@@ -13,6 +13,7 @@
     
     <!-- 구글 파이어베이스(Firebase) 핵심 도구 불러오기 -->
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
 
     <style>
@@ -235,7 +236,7 @@
 
             <form onsubmit="handleAdminLogin(event)" class="space-y-4">
                 <div>
-                    <input type="password" id="admin-password" placeholder="비밀번호 입력" required class="w-full px-4 py-3 bg-slate-50 border border-slate-300 rounded-xl text-base font-semibold text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                    <label for="admin-email" class="block text-sm font-bold mb-1">관리자 이메일</label><input type="email" id="admin-email" autocomplete="username" required class="w-full px-4 py-3 mb-2 border border-slate-300 rounded-xl"><input autocomplete="current-password" type="password" id="admin-password" placeholder="비밀번호 입력" required class="w-full px-4 py-3 bg-slate-50 border border-slate-300 rounded-xl text-base font-semibold text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none">
                 </div>
                 <div class="flex items-center justify-end gap-2">
                     <button type="button" onclick="closeLoginModal()" class="w-1/2 py-3 text-base font-bold text-slate-600 hover:bg-slate-100 rounded-xl">
@@ -305,35 +306,40 @@
         firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        const PASSWORD_KEY = 'exam_admin_password_v4';
-        const ADMIN_LOGIN_KEY = 'exam_admin_logged_in_v4';
-        
+        const auth = firebase.auth();
+        const adminUid = '12DhJywl7OMKoIk8Lpn0MFQ159d2';
         let records = [];
         let currentFilter = 'all';
         let isAdminLoggedIn = false;
 
-        window.onload = function() {
-            loadRecords();
-            initPassword();
-            
-            if (localStorage.getItem(ADMIN_LOGIN_KEY) === 'true') {
-                isAdminLoggedIn = true;
-            }
-
+        window.addEventListener('DOMContentLoaded', () => {
             renderAdminAuthUI();
-        };
-
-        function initPassword() {
-            if (!localStorage.getItem(PASSWORD_KEY)) {
-                localStorage.setItem(PASSWORD_KEY, 'admin1234');
-            }
-        }
+            renderTable();
+            auth.onAuthStateChanged(user => {
+                isAdminLoggedIn = user?.uid === adminUid;
+                if (!isAdminLoggedIn) records = [];
+                renderAdminAuthUI();
+                renderTable();
+                if (isAdminLoggedIn) loadRecords();
+            });
+        });
 
         function loadRecords() {
+            if (!isAdminLoggedIn) return;
             db.collection("exam_records").orderBy("id", "desc").get().then((querySnapshot) => {
+                if (!isAdminLoggedIn || auth.currentUser?.uid !== adminUid) return;
                 records = [];
                 querySnapshot.forEach((doc) => {
-                    records.push(doc.data());
+                    const data = doc.data();
+                    const id = Number(doc.id);
+                    if (!Number.isSafeInteger(id) || String(id) !== doc.id) return;
+                    const text = value => typeof value === 'string' ? value : '';
+                    const examRanges = Array.isArray(data.examRanges) ? data.examRanges
+                        .filter(item => item && typeof item === 'object')
+                        .map(item => ({subject:text(item.subject),publisher:text(item.publisher),author:text(item.author),range:text(item.range)})) : [];
+                    records.push({...data,id,examRanges,studentName:text(data.studentName),schoolName:text(data.schoolName),
+                        grade:text(data.grade),manager:text(data.manager),startDate:text(data.startDate),endDate:text(data.endDate),
+                        status:data.status === '발송완료' ? '발송완료' : '미발송'});
                 });
                 updateStats();
                 renderTable();
@@ -427,29 +433,32 @@
             document.getElementById('login-modal').classList.add('hidden');
         }
 
-        function handleAdminLogin(e) {
+        async function handleAdminLogin(e) {
             e.preventDefault();
-            const pass = document.getElementById('admin-password').value.trim();
-            const savedPass = localStorage.getItem(PASSWORD_KEY) || 'admin1234';
-
-            if (pass === savedPass) {
-                isAdminLoggedIn = true;
-                localStorage.setItem(ADMIN_LOGIN_KEY, 'true');
+            const email = document.getElementById('admin-email').value.trim();
+            const password = document.getElementById('admin-password').value;
+            try {
+                const {user} = await auth.signInWithEmailAndPassword(email,password);
+                if (user.uid !== adminUid) {
+                    await auth.signOut();
+                    showToast('관리자 권한이 없는 계정입니다.');
+                    return;
+                }
+                document.getElementById('admin-password').value = '';
                 closeLoginModal();
-                renderAdminAuthUI();
-                renderTable();
                 showToast('관리자 로그인되었습니다.');
-            } else {
-                showToast('비밀번호가 일치하지 않습니다.');
+            } catch {
+                showToast('관리자 로그인에 실패했습니다. 이메일과 비밀번호를 확인해 주세요.');
             }
         }
 
-        function handleAdminLogout() {
-            isAdminLoggedIn = false;
-            localStorage.removeItem(ADMIN_LOGIN_KEY);
-            renderAdminAuthUI();
-            renderTable();
-            showToast('로그아웃되었습니다.');
+        async function handleAdminLogout() {
+            try {
+                await auth.signOut();
+                showToast('로그아웃되었습니다.');
+            } catch {
+                showToast('로그아웃하지 못했습니다. 다시 시도해 주세요.');
+            }
         }
 
         function openPasswordModal() {
@@ -463,31 +472,26 @@
             document.getElementById('password-modal').classList.add('hidden');
         }
 
-        function handlePasswordChange(e) {
+        async function handlePasswordChange(e) {
             e.preventDefault();
-            const currentPass = document.getElementById('current-password').value.trim();
-            const newPass = document.getElementById('new-password').value.trim();
-            const confirmPass = document.getElementById('confirm-password').value.trim();
-            const savedPass = localStorage.getItem(PASSWORD_KEY) || 'admin1234';
-
-            if (currentPass !== savedPass) {
-                showToast('현재 비밀번호가 일치하지 않습니다.');
+            const user = auth.currentUser;
+            if (user?.uid !== adminUid) return;
+            const currentPass = document.getElementById('current-password').value;
+            const newPass = document.getElementById('new-password').value;
+            const confirmation = document.getElementById('confirm-password').value;
+            if (newPass.length < 6 || newPass !== confirmation) {
+                showToast('새 비밀번호를 6자 이상 입력하고 확인란에 동일하게 입력해 주세요.');
                 return;
             }
-
-            if (newPass.length < 4) {
-                showToast('새 비밀번호는 최소 4자 이상이어야 합니다.');
-                return;
+            try {
+                const credential = firebase.auth.EmailAuthProvider.credential(user.email,currentPass);
+                await user.reauthenticateWithCredential(credential);
+                await user.updatePassword(newPass);
+                closePasswordModal();
+                showToast('관리자 비밀번호를 변경했습니다.');
+            } catch {
+                showToast('비밀번호를 변경하지 못했습니다. 현재 비밀번호와 새 비밀번호를 확인해 주세요.');
             }
-
-            if (newPass !== confirmPass) {
-                showToast('새 비밀번호와 확인란이 일치하지 않습니다.');
-                return;
-            }
-
-            localStorage.setItem(PASSWORD_KEY, newPass);
-            closePasswordModal();
-            showToast('관리자 비밀번호가 성공적으로 변경되었습니다.');
         }
 
         function setFilter(filter) {
@@ -557,6 +561,11 @@
             const query = searchInputEl ? searchInputEl.value.trim().toLowerCase() : '';
 
             tbody.innerHTML = '';
+            tbody.closest('table').classList.toggle('hidden',!isAdminLoggedIn);
+            if (!isAdminLoggedIn) {
+                emptyState.classList.add('hidden');
+                return;
+            }
 
             const filteredRecords = records.filter(r => {
                 const matchesFilter = !isAdminLoggedIn || currentFilter === 'all' || r.status === currentFilter;
@@ -584,7 +593,7 @@
                         ? 'bg-emerald-100 text-emerald-800 border-emerald-300' 
                         : 'bg-rose-100 text-rose-800 border-rose-300';
 
-                    const formattedDateRange = `${formatShortDate(record.startDate)} ~ ${formatShortDate(record.endDate)}`;
+                    const formattedDateRange = escapeHtml(formatShortDate(record.startDate)) + ' ~ ' + escapeHtml(formatShortDate(record.endDate));
 
                     // 저자 이름만 출력되도록 수정 (출판사 / 저자이름)
                     const rangesListHtml = (record.examRanges && record.examRanges.length > 0)
@@ -816,6 +825,7 @@
 
             const managerVal = document.getElementById('manager').value.trim();
 
+            if (editId && !isAdminLoggedIn) return;
             if (editId) {
                 const index = records.findIndex(r => r.id === parseInt(editId, 10));
                 if (index !== -1) {
@@ -832,11 +842,12 @@
                         status: existingStatus
                     };
                     saveRecordToFirebase(updatedRecord, () => {
+                        closeModal();
                         showToast('성공적으로 수정되었습니다.');
                     });
                 }
             } else {
-                const newId = records.length > 0 ? Math.max(...records.map(r => r.id)) + 1 : 1;
+                const newId = Date.now() * 1000 + crypto.getRandomValues(new Uint32Array(1))[0] % 1000;
                 const newRecord = {
                     id: newId,
                     studentName: document.getElementById('studentName').value.trim(),
@@ -849,11 +860,11 @@
                     status: '미발송'
                 };
                 saveRecordToFirebase(newRecord, () => {
+                    closeModal();
                     showToast('기출문제 신청이 등록되었습니다.');
                 });
             }
 
-            closeModal();
         }
 
         function deleteRecord(id) {
